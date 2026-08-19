@@ -2,6 +2,7 @@ package dev.jeziellago.compose.markdowntext
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Rect
 import android.text.Layout
 import android.text.Selection
 import android.text.Spannable
@@ -9,12 +10,16 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ClickableSpan
 import android.util.AttributeSet
+import android.view.accessibility.AccessibilityEvent
 import android.view.MotionEvent
 import android.view.View.MeasureSpec
 import android.view.ViewConfiguration
 import androidx.appcompat.widget.AppCompatTextView
 import androidx.core.graphics.withTranslation
 import androidx.core.text.getSpans
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
+import androidx.customview.widget.ExploreByTouchHelper
 import io.noties.markwon.core.spans.BlockQuoteSpan
 import io.noties.markwon.core.spans.CodeBlockSpan
 import io.noties.markwon.ext.tables.TableRowSpan
@@ -46,6 +51,21 @@ class CustomTextView : AppCompatTextView {
     private var hasMoved = false
     private var didLongPress = false
     private var didPerformClickForCurrentGesture = false
+    private var isBlockLevelAccessibilityEnabled: Boolean = false
+    private var blockAccessibilityHelper: BlockAccessibilityHelper? = null
+
+    private data class AccessibilityBlock(
+        val id: Int,
+        val firstLine: Int,
+        val lastLine: Int,
+        val bounds: Rect,
+        val text: String,
+    )
+
+    init {
+        blockAccessibilityHelper = BlockAccessibilityHelper(this)
+        ViewCompat.setAccessibilityDelegate(this, blockAccessibilityHelper)
+    }
 
     constructor(context: Context) :
             super(context, null, android.R.attr.textViewStyle)
@@ -77,6 +97,10 @@ class CustomTextView : AppCompatTextView {
         val wrappedWidth = measuredWidth - uselessPaddingWidth
         val height = measuredHeight
         setMeasuredDimension(wrappedWidth, height)
+    }
+
+    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
+        return (blockAccessibilityHelper?.dispatchHoverEvent(event) == true) || super.dispatchHoverEvent(event)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -181,6 +205,18 @@ class CustomTextView : AppCompatTextView {
         return super.dispatchTouchEvent(event)
     }
 
+    override fun onTextChanged(text: CharSequence?, start: Int, lengthBefore: Int, lengthAfter: Int) {
+        super.onTextChanged(text, start, lengthBefore, lengthAfter)
+        blockAccessibilityHelper?.invalidateRoot()
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        if (changed) {
+            blockAccessibilityHelper?.invalidateRoot()
+        }
+    }
+
     public override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         // Clean up resources when view is recycled in LazyColumn
@@ -202,6 +238,7 @@ class CustomTextView : AppCompatTextView {
         text = ""
         removeAllSpans()
         lastMeasureWidth = -1
+        blockAccessibilityHelper?.invalidateRoot()
     }
 
     private fun getClickableSpans(event: MotionEvent): Array<ClickableSpan> {
@@ -282,10 +319,17 @@ class CustomTextView : AppCompatTextView {
 
     fun setOnBlockClickListener(listener: (() -> Unit)?) {
         onBlockClick = listener
+        blockAccessibilityHelper?.invalidateRoot()
     }
 
     fun setLinkClicksEnabled(enabled: Boolean) {
         areLinkClicksEnabled = enabled
+    }
+
+    fun setBlockLevelAccessibilityEnabled(enabled: Boolean) {
+        if (isBlockLevelAccessibilityEnabled == enabled) return
+        isBlockLevelAccessibilityEnabled = enabled
+        blockAccessibilityHelper?.invalidateRoot()
     }
 
     private fun getMaxLineWidth(layout: Layout): Float =
@@ -308,6 +352,175 @@ class CustomTextView : AppCompatTextView {
         val spannable = if (text is Spannable) text as Spannable else SpannableString(text)
         return spannable.getSpans<Any>(0, text.length).any {
             it is TableRowSpan || it is TableSpan || it is CodeBlockSpan || it is BlockQuoteSpan
+        }
+    }
+
+    private fun buildAccessibilityBlocks(): List<AccessibilityBlock> {
+        val layout = layout ?: return emptyList()
+        val content = text?.toString().orEmpty()
+        if (content.isBlank() || layout.lineCount == 0) return emptyList()
+
+        val blocks = mutableListOf<AccessibilityBlock>()
+        var runStartLine = -1
+        var runStartOffset = -1
+
+        fun isLineBlank(line: Int): Boolean {
+            val start = layout.getLineStart(line).coerceIn(0, content.length)
+            val end = layout.getLineEnd(line).coerceIn(0, content.length)
+            if (start >= end) return true
+            return content.substring(start, end).trim().isEmpty()
+        }
+
+        fun lineEndsWithExplicitNewline(line: Int): Boolean {
+            val end = layout.getLineEnd(line).coerceIn(0, content.length)
+            if (end <= 0) return false
+            return content[end - 1] == '\n'
+        }
+
+        fun closeRun(lastLine: Int, runEndOffset: Int) {
+            if (runStartLine == -1 || runStartOffset == -1) return
+            val safeEndOffset = runEndOffset.coerceIn(0, content.length)
+            val blockText = content.substring(runStartOffset.coerceIn(0, safeEndOffset), safeEndOffset).trim()
+            if (blockText.isBlank()) {
+                runStartLine = -1
+                runStartOffset = -1
+                return
+            }
+
+            val left = (totalPaddingLeft - scrollX).coerceAtLeast(0)
+            val right = (width - totalPaddingRight - scrollX).coerceAtLeast(left + 1)
+            val top = (totalPaddingTop + layout.getLineTop(runStartLine) - scrollY).coerceAtLeast(0)
+            val bottom = (totalPaddingTop + layout.getLineBottom(lastLine) - scrollY).coerceAtLeast(top + 1)
+
+            blocks += AccessibilityBlock(
+                id = blocks.size,
+                firstLine = runStartLine,
+                lastLine = lastLine,
+                bounds = Rect(left, top, right, bottom),
+                text = blockText,
+            )
+            runStartLine = -1
+            runStartOffset = -1
+        }
+
+        for (line in 0 until layout.lineCount) {
+            if (isLineBlank(line)) {
+                closeRun(
+                    lastLine = line - 1,
+                    runEndOffset = layout.getLineStart(line).coerceIn(0, content.length),
+                )
+                continue
+            }
+
+            if (runStartLine == -1) {
+                runStartLine = line
+                runStartOffset = layout.getLineStart(line).coerceIn(0, content.length)
+            }
+
+            if (lineEndsWithExplicitNewline(line) && line < layout.lineCount - 1) {
+                closeRun(
+                    lastLine = line,
+                    runEndOffset = layout.getLineEnd(line).coerceIn(0, content.length),
+                )
+            }
+        }
+
+        if (runStartLine != -1) {
+            val lastLine = layout.lineCount - 1
+            closeRun(
+                lastLine = lastLine,
+                runEndOffset = layout.getLineEnd(lastLine).coerceIn(0, content.length),
+            )
+        }
+
+        return blocks
+    }
+
+    private inner class BlockAccessibilityHelper(host: CustomTextView) : ExploreByTouchHelper(host) {
+
+        override fun onPopulateNodeForHost(node: AccessibilityNodeInfoCompat) {
+            super.onPopulateNodeForHost(node)
+            if (!isBlockLevelAccessibilityEnabled) {
+                return
+            }
+            // Keep host as a container so TalkBack traverses virtual block children instead of
+            // announcing one giant TextView node first.
+            node.text = null
+            node.contentDescription = null
+            node.className = android.view.View::class.java.name
+            node.isFocusable = false
+            node.isClickable = false
+            node.isScreenReaderFocusable = false
+        }
+
+        override fun getVirtualViewAt(x: Float, y: Float): Int {
+            if (!isBlockLevelAccessibilityEnabled) return INVALID_ID
+            if (x < 0f || y < 0f || x >= width.toFloat() || y >= height.toFloat()) {
+                return INVALID_ID
+            }
+
+            val layout = layout ?: return INVALID_ID
+            if (layout.height <= 0) return INVALID_ID
+
+            val blocks = buildAccessibilityBlocks()
+            if (blocks.isEmpty()) return INVALID_ID
+
+            val tappedBlock = blocks.firstOrNull { it.bounds.contains(x.toInt(), y.toInt()) }
+            if (tappedBlock != null) return tappedBlock.id
+
+            val localY = (y.toInt() + scrollY - totalPaddingTop).coerceIn(0, layout.height - 1)
+            val line = layout.getLineForVertical(localY)
+            return blocks.firstOrNull { line in it.firstLine..it.lastLine }?.id ?: INVALID_ID
+        }
+
+        override fun getVisibleVirtualViews(virtualViewIds: MutableList<Int>) {
+            if (!isBlockLevelAccessibilityEnabled) return
+            val blocks = buildAccessibilityBlocks()
+            for (block in blocks) {
+                virtualViewIds += block.id
+            }
+        }
+
+        override fun onPopulateNodeForVirtualView(
+            virtualViewId: Int,
+            node: AccessibilityNodeInfoCompat,
+        ) {
+            if (!isBlockLevelAccessibilityEnabled) {
+                node.setBoundsInParent(Rect(0, 0, 1, 1))
+                node.isVisibleToUser = false
+                return
+            }
+            val block = buildAccessibilityBlocks().getOrNull(virtualViewId) ?: run {
+                node.setBoundsInParent(Rect(0, 0, 1, 1))
+                node.isVisibleToUser = false
+                return
+            }
+
+            node.className = AppCompatTextView::class.java.name
+            node.packageName = context.packageName
+            node.setBoundsInParent(block.bounds)
+            node.text = block.text
+            node.contentDescription = block.text
+            node.isFocusable = true
+            node.isVisibleToUser = block.bounds.bottom > 0 && block.bounds.top < height
+            if (onBlockClick != null) {
+                node.isClickable = true
+                node.addAction(AccessibilityNodeInfoCompat.ACTION_CLICK)
+            }
+        }
+
+        override fun onPerformActionForVirtualView(
+            virtualViewId: Int,
+            action: Int,
+            arguments: android.os.Bundle?,
+        ): Boolean {
+            if (!isBlockLevelAccessibilityEnabled) return false
+            if (action == AccessibilityNodeInfoCompat.ACTION_CLICK && onBlockClick != null) {
+                onBlockClick?.invoke()
+                sendEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED)
+                return true
+            }
+            return false
         }
     }
 }
