@@ -436,11 +436,18 @@ class CustomTextView : AppCompatTextView {
         return blocks
     }
 
+    private fun shouldUseBlockLevelAccessibility(): Boolean {
+        // Disable block-level accessibility when content contains complex markdown structures
+        // that have their own internal accessibility handling (tables, code blocks, blockquotes)
+        if (!isBlockLevelAccessibilityEnabled) return false
+        return !containsLongMarkdown()
+    }
+
     private inner class BlockAccessibilityHelper(host: CustomTextView) : ExploreByTouchHelper(host) {
 
         override fun onPopulateNodeForHost(node: AccessibilityNodeInfoCompat) {
             super.onPopulateNodeForHost(node)
-            if (!isBlockLevelAccessibilityEnabled) {
+            if (!shouldUseBlockLevelAccessibility()) {
                 return
             }
             // Keep host as a container so TalkBack traverses virtual block children instead of
@@ -454,7 +461,7 @@ class CustomTextView : AppCompatTextView {
         }
 
         override fun getVirtualViewAt(x: Float, y: Float): Int {
-            if (!isBlockLevelAccessibilityEnabled) return INVALID_ID
+            if (!shouldUseBlockLevelAccessibility()) return INVALID_ID
             if (x < 0f || y < 0f || x >= width.toFloat() || y >= height.toFloat()) {
                 return INVALID_ID
             }
@@ -474,7 +481,7 @@ class CustomTextView : AppCompatTextView {
         }
 
         override fun getVisibleVirtualViews(virtualViewIds: MutableList<Int>) {
-            if (!isBlockLevelAccessibilityEnabled) return
+            if (!shouldUseBlockLevelAccessibility()) return
             val blocks = buildAccessibilityBlocks()
             for (block in blocks) {
                 virtualViewIds += block.id
@@ -485,7 +492,7 @@ class CustomTextView : AppCompatTextView {
             virtualViewId: Int,
             node: AccessibilityNodeInfoCompat,
         ) {
-            if (!isBlockLevelAccessibilityEnabled) {
+            if (!shouldUseBlockLevelAccessibility()) {
                 node.setBoundsInParent(Rect(0, 0, 1, 1))
                 node.isVisibleToUser = false
                 return
@@ -514,7 +521,7 @@ class CustomTextView : AppCompatTextView {
             action: Int,
             arguments: android.os.Bundle?,
         ): Boolean {
-            if (!isBlockLevelAccessibilityEnabled) return false
+            if (!shouldUseBlockLevelAccessibility()) return false
             if (action == AccessibilityNodeInfoCompat.ACTION_CLICK && onBlockClick != null) {
                 onBlockClick?.invoke()
                 sendEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED)
