@@ -52,6 +52,7 @@ fun MarkdownText(
     headingBreakColor: Color = Color.Transparent,
     enableUnderlineForLink: Boolean = true,
     importForAccessibility: Int = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO,
+    enableBlockLevelAccessibility: Boolean = false,
     /** Enables text wrapping. See https://github.com/jeziellago/compose-markdown/pull/157 */
     wrapMultilineTextWidth: Boolean = false,
     beforeSetMarkdown: ((TextView, Spanned) -> Unit)? = null,
@@ -110,6 +111,7 @@ fun MarkdownText(
                     setTextIsSelectable(isTextSelectable)
                     setOnBlockClickListener(onClick)
                     setLinkClicksEnabled(!disableLinkMovementMethod)
+                    setBlockLevelAccessibilityEnabled(enableBlockLevelAccessibility)
 
                     movementMethod = if (disableLinkMovementMethod) {
                         null
@@ -155,6 +157,7 @@ fun MarkdownText(
                 textView.setTextIsSelectable(isTextSelectable)
                 textView.setOnBlockClickListener(onClick)
                 textView.setLinkClicksEnabled(!disableLinkMovementMethod)
+                textView.setBlockLevelAccessibilityEnabled(enableBlockLevelAccessibility)
                 markdownRender.setMarkdown(textView, markdown)
                 textView.movementMethod = if (disableLinkMovementMethod) {
                     null
