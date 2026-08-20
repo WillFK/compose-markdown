@@ -58,7 +58,8 @@ fun MarkdownText(
     beforeSetMarkdown: ((TextView, Spanned) -> Unit)? = null,
     afterSetMarkdown: ((TextView) -> Unit)? = null,
     onLinkClicked: ((String) -> Unit)? = null,
-    onTextLayout: ((numLines: Int) -> Unit)? = null
+    onTextLayout: ((numLines: Int) -> Unit)? = null,
+    enableBlockLevelAccessibility: Boolean = false,
 ) {
     val defaultColor: Color = LocalContentColor.current
     val context: Context = LocalContext.current

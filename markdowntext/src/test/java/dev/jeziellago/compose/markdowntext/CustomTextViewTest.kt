@@ -1,12 +1,20 @@
 package dev.jeziellago.compose.markdowntext
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.text.Spannable
 import android.text.SpannableString
+import android.text.Spanned
 import android.text.style.ClickableSpan
 import android.view.MotionEvent
 import android.view.View
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import androidx.test.core.app.ApplicationProvider
+import io.noties.markwon.ext.tables.TableRowSpan
+import io.noties.markwon.ext.tables.TableSpan
+import io.noties.markwon.ext.tables.TableTheme
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -210,6 +218,60 @@ class CustomTextViewTest {
 
         assert(!linkClicked) { "Disabled link clicks should not trigger clickable spans" }
         assert(blockClicked) { "Disabled link clicks should fall through to the block click callback" }
+    }
+
+    @Test
+    fun `test block accessibility builds table rows with cell text`() {
+        val tableText = SpannableString("\u00a0\n\u00a0")
+        tableText.setSpan(createTableRowSpan("Country", "Capital"), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        tableText.setSpan(createTableRowSpan("Argentina", "Buenos Aires"), 2, 3, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        tableText.setSpan(TableSpan(), 0, tableText.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        textView.text = tableText
+        textView.setBlockLevelAccessibilityEnabled(true)
+        measureAndLayoutTextView()
+        textView.draw(Canvas(Bitmap.createBitmap(LAYOUT_WIDTH, LAYOUT_HEIGHT, Bitmap.Config.ARGB_8888)))
+
+        val buildBlocks = CustomTextView::class.java.getDeclaredMethod("buildAccessibilityBlocks")
+        buildBlocks.isAccessible = true
+        val blocks = buildBlocks.invoke(textView) as List<*>
+        val textField = checkNotNull(blocks.firstOrNull()).javaClass.getDeclaredField("text")
+        textField.isAccessible = true
+
+        assertEquals(
+            listOf("Country, Capital", "Argentina, Buenos Aires"),
+            blocks.map { textField.get(it) },
+        )
+    }
+
+    @Test
+    fun `test stale accessibility block remains a valid hidden node`() {
+        textView.text = "Paragraph"
+        textView.setBlockLevelAccessibilityEnabled(true)
+        measureAndLayoutTextView()
+
+        val helperField = CustomTextView::class.java.getDeclaredField("blockAccessibilityHelper")
+        helperField.isAccessible = true
+        val helper = checkNotNull(helperField.get(textView))
+        val populateNode = helper.javaClass.getDeclaredMethod(
+            "onPopulateNodeForVirtualView",
+            Int::class.javaPrimitiveType,
+            AccessibilityNodeInfoCompat::class.java,
+        )
+        populateNode.isAccessible = true
+        val node = AccessibilityNodeInfoCompat.obtain()
+
+        populateNode.invoke(helper, 999, node)
+
+        assertEquals("", node.contentDescription)
+    }
+
+    private fun createTableRowSpan(vararg cells: String): TableRowSpan {
+        return TableRowSpan(
+            TableTheme.create(context),
+            cells.map { TableRowSpan.Cell(TableRowSpan.ALIGN_LEFT, it) },
+            false,
+            false,
+        )
     }
 
     private fun measureAndLayoutTextView() {
