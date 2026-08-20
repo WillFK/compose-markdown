@@ -231,7 +231,7 @@ fun BlockLevelAccessibility() {
 }
 ```
 
-When `enableBlockLevelAccessibility = true`, TalkBack focuses each block individually (heading, then each paragraph), making it easier for users to navigate long markdown documents.
+When `enableBlockLevelAccessibility = true`, TalkBack focuses each block individually, including headings, paragraphs, and table rows, making it easier for users to navigate long markdown documents.
 
 ## Sample App
 
