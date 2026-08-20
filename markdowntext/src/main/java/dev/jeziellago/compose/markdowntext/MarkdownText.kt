@@ -3,7 +3,6 @@ package dev.jeziellago.compose.markdowntext
 import android.content.Context
 import android.os.Build
 import android.text.Spanned
-import android.text.method.LinkMovementMethod
 import android.text.util.Linkify
 import android.view.View
 import android.widget.TextView
@@ -26,6 +25,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.widget.TextViewCompat
 import coil3.ImageLoader
 import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TableAwareMovementMethod
 
 @Composable
 fun MarkdownText(
@@ -52,13 +52,13 @@ fun MarkdownText(
     headingBreakColor: Color = Color.Transparent,
     enableUnderlineForLink: Boolean = true,
     importForAccessibility: Int = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO,
-    enableBlockLevelAccessibility: Boolean = false,
     /** Enables text wrapping. See https://github.com/jeziellago/compose-markdown/pull/157 */
     wrapMultilineTextWidth: Boolean = false,
     beforeSetMarkdown: ((TextView, Spanned) -> Unit)? = null,
     afterSetMarkdown: ((TextView) -> Unit)? = null,
     onLinkClicked: ((String) -> Unit)? = null,
-    onTextLayout: ((numLines: Int) -> Unit)? = null
+    onTextLayout: ((numLines: Int) -> Unit)? = null,
+    enableBlockLevelAccessibility: Boolean = false,
 ) {
     val defaultColor: Color = LocalContentColor.current
     val context: Context = LocalContext.current
@@ -116,7 +116,7 @@ fun MarkdownText(
                     movementMethod = if (disableLinkMovementMethod) {
                         null
                     } else {
-                        LinkMovementMethod.getInstance()
+                        TableAwareMovementMethod.create()
                     }
 
                     if (truncateOnTextOverflow) enableTextOverflow()
@@ -162,7 +162,7 @@ fun MarkdownText(
                 textView.movementMethod = if (disableLinkMovementMethod) {
                     null
                 } else {
-                    LinkMovementMethod.getInstance()
+                    TableAwareMovementMethod.create()
                 }
                 if (onTextLayout != null) {
                     textView.post {
