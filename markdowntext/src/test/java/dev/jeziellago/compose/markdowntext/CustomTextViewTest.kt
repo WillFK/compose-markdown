@@ -7,8 +7,11 @@ import android.text.Spannable
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ClickableSpan
+import android.text.util.Linkify
 import android.view.MotionEvent
 import android.view.View
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import androidx.test.core.app.ApplicationProvider
 import io.noties.markwon.ext.tables.TableRowSpan
@@ -221,7 +224,7 @@ class CustomTextViewTest {
     }
 
     @Test
-    fun `test block accessibility builds table rows with cell text`() {
+    fun `test block accessibility builds individual table cells`() {
         val tableText = SpannableString("\u00a0\n\u00a0")
         tableText.setSpan(createTableRowSpan("Country", "Capital"), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         tableText.setSpan(createTableRowSpan("Argentina", "Buenos Aires"), 2, 3, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -231,16 +234,96 @@ class CustomTextViewTest {
         measureAndLayoutTextView()
         textView.draw(Canvas(Bitmap.createBitmap(LAYOUT_WIDTH, LAYOUT_HEIGHT, Bitmap.Config.ARGB_8888)))
 
-        val buildBlocks = CustomTextView::class.java.getDeclaredMethod("buildAccessibilityBlocks")
-        buildBlocks.isAccessible = true
-        val blocks = buildBlocks.invoke(textView) as List<*>
+        val blocks = accessibilityBlocks()
         val textField = checkNotNull(blocks.firstOrNull()).javaClass.getDeclaredField("text")
         textField.isAccessible = true
 
         assertEquals(
-            listOf("Country, Capital", "Argentina, Buenos Aires"),
+            listOf("Country", "Capital", "Argentina", "Buenos Aires"),
             blocks.map { textField.get(it) },
         )
+    }
+
+    @Test
+    fun `test table accessibility activates explicit and bare URL links`() {
+        val clickedLinks = mutableListOf<String>()
+        val markwon = MarkdownRender.create(
+            context = context,
+            imageLoader = null,
+            linkifyMask = Linkify.WEB_URLS,
+            enableSoftBreakAddsNewLine = false,
+            syntaxHighlightColor = Color.LightGray,
+            syntaxHighlightTextColor = Color.Unspecified,
+            headingBreakColor = Color.Transparent,
+            enableUnderlineForLink = true,
+            onLinkClicked = clickedLinks::add,
+            style = TextStyle(),
+        )
+        markwon.setMarkdown(
+            textView,
+            """
+                | Type | Link |
+                |---|---|
+                | Bare | https://example.com/bare |
+                | Explicit | [Docs](https://example.com/docs) |
+            """.trimIndent(),
+        )
+        textView.setBlockLevelAccessibilityEnabled(true)
+        measureAndDrawTextView()
+        measureAndDrawTextView()
+
+        val blocks = accessibilityBlocks()
+        val blockClass = checkNotNull(blocks.firstOrNull()).javaClass
+        val textField = blockClass.getDeclaredField("text").apply { isAccessible = true }
+        val clickableSpanField = blockClass.getDeclaredField("clickableSpan").apply { isAccessible = true }
+        val idField = blockClass.getDeclaredField("id").apply { isAccessible = true }
+        val linkBlocks = blocks.filter { clickableSpanField.get(it) != null }
+        val linksByText = linkBlocks.associateBy { checkNotNull(textField.get(it)).toString() }
+
+        assertEquals(setOf("https://example.com/bare", "Docs"), linksByText.keys)
+
+        performAccessibilityClick(idField.getInt(linksByText.getValue("https://example.com/bare")))
+        performAccessibilityClick(idField.getInt(linksByText.getValue("Docs")))
+
+        assertEquals(
+            listOf("https://example.com/bare", "https://example.com/docs"),
+            clickedLinks,
+        )
+    }
+
+    @Test
+    fun `test table accessibility updates when link clicks are toggled`() {
+        val markwon = MarkdownRender.create(
+            context = context,
+            imageLoader = null,
+            linkifyMask = Linkify.WEB_URLS,
+            enableSoftBreakAddsNewLine = false,
+            syntaxHighlightColor = Color.LightGray,
+            syntaxHighlightTextColor = Color.Unspecified,
+            headingBreakColor = Color.Transparent,
+            enableUnderlineForLink = true,
+            onLinkClicked = {},
+            style = TextStyle(),
+        )
+        markwon.setMarkdown(
+            textView,
+            """
+                | Type | Link |
+                |---|---|
+                | Documentation | [Docs](https://example.com/docs) |
+            """.trimIndent(),
+        )
+        textView.setBlockLevelAccessibilityEnabled(true)
+        measureAndDrawTextView()
+        measureAndDrawTextView()
+
+        assertEquals(1, clickableAccessibilityBlockCount())
+
+        textView.setLinkClicksEnabled(false)
+        assertEquals(0, clickableAccessibilityBlockCount())
+
+        textView.setLinkClicksEnabled(true)
+        assertEquals(1, clickableAccessibilityBlockCount())
     }
 
     @Test
@@ -265,13 +348,51 @@ class CustomTextViewTest {
         assertEquals("", node.contentDescription)
     }
 
-    private fun createTableRowSpan(vararg cells: String): TableRowSpan {
+    private fun createTableRowSpan(vararg cells: CharSequence): TableRowSpan {
         return TableRowSpan(
             TableTheme.create(context),
             cells.map { TableRowSpan.Cell(TableRowSpan.ALIGN_LEFT, it) },
             false,
             false,
         )
+    }
+
+    private fun accessibilityBlocks(): List<*> {
+        val buildBlocks = CustomTextView::class.java.getDeclaredMethod("buildAccessibilityBlocks")
+        buildBlocks.isAccessible = true
+        return buildBlocks.invoke(textView) as List<*>
+    }
+
+    private fun clickableAccessibilityBlockCount(): Int {
+        val blocks = accessibilityBlocks()
+        val clickableSpanField = checkNotNull(blocks.firstOrNull())
+            .javaClass
+            .getDeclaredField("clickableSpan")
+            .apply { isAccessible = true }
+        return blocks.count { clickableSpanField.get(it) != null }
+    }
+
+    private fun performAccessibilityClick(virtualViewId: Int) {
+        val helperField = CustomTextView::class.java.getDeclaredField("blockAccessibilityHelper")
+        helperField.isAccessible = true
+        val helper = checkNotNull(helperField.get(textView))
+        val performAction = helper.javaClass.getDeclaredMethod(
+            "onPerformActionForVirtualView",
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            android.os.Bundle::class.java,
+        )
+        performAction.isAccessible = true
+
+        assertEquals(
+            true,
+            performAction.invoke(helper, virtualViewId, AccessibilityNodeInfoCompat.ACTION_CLICK, null),
+        )
+    }
+
+    private fun measureAndDrawTextView() {
+        measureAndLayoutTextView()
+        textView.draw(Canvas(Bitmap.createBitmap(LAYOUT_WIDTH, LAYOUT_HEIGHT, Bitmap.Config.ARGB_8888)))
     }
 
     private fun measureAndLayoutTextView() {

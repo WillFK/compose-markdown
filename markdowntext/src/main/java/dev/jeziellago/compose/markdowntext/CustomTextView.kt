@@ -25,6 +25,8 @@ import io.noties.markwon.core.spans.CodeBlockSpan
 import io.noties.markwon.ext.tables.TableRowSpan
 import io.noties.markwon.ext.tables.TableSpan
 import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * This View contains a hack of the original TextView to fix the sizing issue of multiline text.
@@ -59,7 +61,8 @@ class CustomTextView : AppCompatTextView {
         val firstLine: Int,
         val lastLine: Int,
         val bounds: Rect,
-        val text: String,
+        val text: CharSequence,
+        val clickableSpan: ClickableSpan? = null,
     )
 
     init {
@@ -323,7 +326,9 @@ class CustomTextView : AppCompatTextView {
     }
 
     fun setLinkClicksEnabled(enabled: Boolean) {
+        if (areLinkClicksEnabled == enabled) return
         areLinkClicksEnabled = enabled
+        blockAccessibilityHelper?.invalidateRoot()
     }
 
     fun setBlockLevelAccessibilityEnabled(enabled: Boolean) {
@@ -418,19 +423,7 @@ class CustomTextView : AppCompatTextView {
                     lastLine = line - 1,
                     runEndOffset = lineStart,
                 )
-
-                blocks += AccessibilityBlock(
-                    id = blocks.size,
-                    firstLine = line,
-                    lastLine = line,
-                    bounds = Rect(
-                        (totalPaddingLeft - scrollX).coerceAtLeast(0),
-                        (totalPaddingTop + layout.getLineTop(line) - scrollY).coerceAtLeast(0),
-                        (width - totalPaddingRight - scrollX).coerceAtLeast(1),
-                        (totalPaddingTop + layout.getLineBottom(line) - scrollY).coerceAtLeast(1)
-                    ),
-                    text = tableRowTextForAccessibility(tableRowSpan),
-                )
+                addTableAccessibilityBlocks(blocks, layout, line, tableRowSpan)
                 continue
             }
 
@@ -466,18 +459,135 @@ class CustomTextView : AppCompatTextView {
         return blocks
     }
 
-    private fun tableRowTextForAccessibility(tableRowSpan: TableRowSpan): String {
+    private fun addTableAccessibilityBlocks(
+        blocks: MutableList<AccessibilityBlock>,
+        layout: Layout,
+        line: Int,
+        tableRowSpan: TableRowSpan,
+    ) {
         val cellWidth = tableRowSpan.cellWidth()
-        if (cellWidth <= 0) return "Table row"
-
-        val cells = mutableListOf<String>()
-        var cellOffset = 0
-        while (cellOffset < width) {
-            val cellLayout = tableRowSpan.findLayoutForHorizontalOffset(cellOffset) ?: break
-            cells += cellLayout.text.toString().trim()
-            cellOffset += cellWidth
+        if (cellWidth <= 0) {
+            blocks += AccessibilityBlock(
+                id = blocks.size,
+                firstLine = line,
+                lastLine = line,
+                bounds = tableRowBounds(layout, line),
+                text = "Table row",
+            )
+            return
         }
-        return cells.filter { it.isNotEmpty() }.joinToString(", ").ifEmpty { "Table row" }
+
+        var cellIndex = 0
+        while (true) {
+            val cellLayout = tableRowSpan.findLayoutForHorizontalOffset(cellIndex * cellWidth) ?: break
+            val cellText = cellLayout.text
+            val spannedCellText = cellText as? Spanned
+            val cellBounds = tableCellBounds(layout, line, cellIndex, cellWidth)
+            val clickableSpans = if (areLinkClicksEnabled) {
+                spannedCellText
+                    ?.getSpans(0, cellText.length, ClickableSpan::class.java)
+                    ?.sortedBy { spannedCellText.getSpanStart(it) }
+                    .orEmpty()
+            } else {
+                emptyList()
+            }
+
+            val trimmedStart = cellText.indexOfFirst { !it.isWhitespace() }
+            val trimmedEnd = cellText.indexOfLast { !it.isWhitespace() } + 1
+            val singleLinkCoversCell = clickableSpans.singleOrNull()?.let {
+                trimmedStart >= 0 &&
+                    (spannedCellText?.getSpanStart(it) ?: Int.MAX_VALUE) <= trimmedStart &&
+                    (spannedCellText?.getSpanEnd(it) ?: Int.MIN_VALUE) >= trimmedEnd
+            } == true
+
+            if (!singleLinkCoversCell) {
+                val label = cellText.toString().trim()
+                if (label.isNotEmpty()) {
+                    blocks += AccessibilityBlock(
+                        id = blocks.size,
+                        firstLine = line,
+                        lastLine = line,
+                        bounds = cellBounds,
+                        text = label,
+                    )
+                }
+            }
+
+            for (clickableSpan in clickableSpans) {
+                val spanStart = spannedCellText?.getSpanStart(clickableSpan) ?: continue
+                val spanEnd = spannedCellText.getSpanEnd(clickableSpan)
+                if (spanStart < 0 || spanEnd <= spanStart) continue
+
+                blocks += AccessibilityBlock(
+                    id = blocks.size,
+                    firstLine = line,
+                    lastLine = line,
+                    bounds = tableLinkBounds(cellLayout, cellBounds, spanStart, spanEnd),
+                    text = cellText.subSequence(spanStart, spanEnd).toString(),
+                    clickableSpan = clickableSpan,
+                )
+            }
+            cellIndex++
+        }
+    }
+
+    private fun tableRowBounds(layout: Layout, line: Int): Rect {
+        val left = (totalPaddingLeft - scrollX).coerceAtLeast(0)
+        val right = (width - totalPaddingRight - scrollX).coerceAtLeast(left + 1)
+        val top = (totalPaddingTop + layout.getLineTop(line) - scrollY).coerceAtLeast(0)
+        val bottom = (totalPaddingTop + layout.getLineBottom(line) - scrollY).coerceAtLeast(top + 1)
+        return Rect(left, top, right, bottom)
+    }
+
+    private fun tableCellBounds(layout: Layout, line: Int, cellIndex: Int, cellWidth: Int): Rect {
+        val rowBounds = tableRowBounds(layout, line)
+        val left = (rowBounds.left + cellIndex * cellWidth).coerceAtMost(rowBounds.right - 1)
+        val right = (left + cellWidth).coerceAtMost(rowBounds.right).coerceAtLeast(left + 1)
+        return Rect(left, rowBounds.top, right, rowBounds.bottom)
+    }
+
+    private fun tableLinkBounds(
+        cellLayout: Layout,
+        cellBounds: Rect,
+        spanStart: Int,
+        spanEnd: Int,
+    ): Rect {
+        val safeStart = spanStart.coerceIn(0, cellLayout.text.length)
+        val safeEnd = spanEnd.coerceIn(safeStart + 1, cellLayout.text.length)
+        val firstLine = cellLayout.getLineForOffset(safeStart)
+        val lastLine = cellLayout.getLineForOffset(safeEnd - 1)
+        var left = Float.MAX_VALUE
+        var right = -Float.MAX_VALUE
+
+        for (line in firstLine..lastLine) {
+            val lineStart = cellLayout.getLineStart(line)
+            val lineEnd = cellLayout.getLineEnd(line)
+            val segmentStart = max(safeStart, lineStart)
+            val segmentEnd = min(safeEnd, lineEnd)
+            val startX = if (segmentStart == lineStart) {
+                cellLayout.getLineLeft(line)
+            } else {
+                cellLayout.getPrimaryHorizontal(segmentStart)
+            }
+            val endX = if (segmentEnd == lineEnd) {
+                cellLayout.getLineRight(line)
+            } else {
+                cellLayout.getPrimaryHorizontal(segmentEnd)
+            }
+            left = min(left, min(startX, endX))
+            right = max(right, max(startX, endX))
+        }
+
+        val horizontalInset = ((cellBounds.width() - cellLayout.width) / 2).coerceAtLeast(0)
+        val verticalInset = ((cellBounds.height() - cellLayout.height) / 2).coerceAtLeast(0)
+        val linkBounds = Rect(
+            cellBounds.left + horizontalInset + left.toInt(),
+            cellBounds.top + verticalInset + cellLayout.getLineTop(firstLine),
+            cellBounds.left + horizontalInset + right.toInt(),
+            cellBounds.top + verticalInset + cellLayout.getLineBottom(lastLine),
+        )
+        if (!linkBounds.intersect(cellBounds)) return cellBounds
+        return if (linkBounds.width() > 0 && linkBounds.height() > 0) linkBounds else cellBounds
     }
 
     private fun blockTextForAccessibility(rawText: String, startOffset: Int, endOffset: Int): String {
@@ -529,7 +639,9 @@ class CustomTextView : AppCompatTextView {
             val layout = layout ?: return INVALID_ID
             if (layout.height <= 0) return INVALID_ID
 
-            val tappedBlock = blocks.firstOrNull { it.bounds.contains(x.toInt(), y.toInt()) }
+            val tappedBlock = blocks.firstOrNull {
+                it.clickableSpan != null && it.bounds.contains(x.toInt(), y.toInt())
+            } ?: blocks.firstOrNull { it.bounds.contains(x.toInt(), y.toInt()) }
             if (tappedBlock != null) return tappedBlock.id
 
             val localY = (y.toInt() + scrollY - totalPaddingTop).coerceIn(0, layout.height - 1)
@@ -567,10 +679,13 @@ class CustomTextView : AppCompatTextView {
             node.packageName = context.packageName
             node.setBoundsInParent(block.bounds)
             node.text = block.text
-            node.contentDescription = block.text
             node.isFocusable = true
             node.isVisibleToUser = block.bounds.bottom > 0 && block.bounds.top < height
-            if (onBlockClick != null) {
+            if (block.clickableSpan != null && areLinkClicksEnabled) {
+                node.roleDescription = "link"
+                node.isClickable = true
+                node.addAction(AccessibilityNodeInfoCompat.ACTION_CLICK)
+            } else if (onBlockClick != null) {
                 node.isClickable = true
                 node.addAction(AccessibilityNodeInfoCompat.ACTION_CLICK)
             }
@@ -583,8 +698,15 @@ class CustomTextView : AppCompatTextView {
         ): Boolean {
             val blocks = buildAccessibilityBlocks()
             if (!shouldUseVirtualBlockAccessibility(blocks)) return false
-            if (blocks.none { it.id == virtualViewId }) return false
-            if (action == AccessibilityNodeInfoCompat.ACTION_CLICK && onBlockClick != null) {
+            val block = blocks.firstOrNull { it.id == virtualViewId } ?: return false
+            if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
+
+            if (block.clickableSpan != null && areLinkClicksEnabled) {
+                block.clickableSpan.onClick(this@CustomTextView)
+                sendEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED)
+                return true
+            }
+            if (onBlockClick != null) {
                 onBlockClick?.invoke()
                 sendEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED)
                 return true
